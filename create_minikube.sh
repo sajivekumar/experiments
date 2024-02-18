@@ -1,11 +1,16 @@
 #!/bin/bash
 
-# Installs minikube
+HOST_IP=`ifconfig | awk '/inet 15/{print substr($2,1)}'`
+PROXY_IP=http://proxyip:port
+NO_PROXY="localhost,127.0.0.1,10.244.0.0/16,10.96.0.0/12,192.168.59.0/24,192.168.39.0/24,192.168.49.0/24,${HOST_IP}"
 
+function info()
+{
+    echo "==================================================================="
+    echo "     $1"
+    echo "==================================================================="
+}
 
-HOST_IP=`hostname -I  | awk '{print substr($1,1)}'`
-PROXY=http://proxy-in.its.hpecorp.net:443
-NO_PROXY=localhost,127.0.0.1,10.244.0.0/16,10.96.0.0/12,192.168.59.0/24,192.168.49.0/24,192.168.39.0/24,$HOST_IP
 
 function option() {
     name=${1//\//\\/}
@@ -16,92 +21,137 @@ function option() {
 }
 
 
+function uninstall_minikube()
+{
+    minikube stop
+    minikube delete
+    rm -r ~/.kube ~/.minikube
+    sudo rm /usr/local/bin/localkube /usr/local/bin/minikube
+    systemctl stop '*kubelet*.mount'
+    sudo rm -rf /etc/kubernetes/
+    docker rm -f $(docker ps -qa)
+    docker system prune -af --volumes
+}
 
-echo "==================================================================="
-echo "Disable firewall and ipv6 "
-echo "==================================================================="
+function check_env()
+{
+    info "K8s Environment "
+    cat /etc/environment
+    info "User profile Environment "
+    env | grep -i proxy | sort
+    info "Docker Service environment "
+    cat /etc/systemd/system/docker.service.d/http-proxy.conf
+    info "Docker Container environment "
+    cat ~/.docker/config.json
+}
 
-# Set up required sysctl params
-  sudo tee /etc/sysctl.d/kubernetes.conf<<EOF
-net.bridge.bridge-nf-call-ip6tables = 1
-net.bridge.bridge-nf-call-iptables = 1
-net.ipv4.ip_forward = 1
-EOF
+function init_env()
+{
+  sudo -E apt-get update
+  sudo -E apt-get install apt-transport-https
+  sudo -E apt-get install curl
+  sudo -E apt-get install net-tools
+  sudo -E apt-get upgrade
+}
 
-  sudo tee /etc/sysctl.d/sysctl.conf<<EOF
-net.ipv6.conf.all.disable_ipv6=1
-net.ipv6.conf.default.disable_ipv6=1
-net.ipv6.conf.lo.disable_ipv6=1
-sudo sysctl -p
-EOF
-
-echo "==> Setup /etc/environments"
+function setup_k8senv()
+{
+    echo "==> Setup /etc/environment"
 cat > /etc/environment <<EOF
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
-export http_proxy=${PROXY}
-export https_proxy=${PROXY}
-export no_proxy=$NO_PROXY
 export NO_PROXY=$NO_PROXY
+export no_proxy=$NO_PROXY
 EOF
+}
 
-echo "==> Setup proxy to user profile"
-# Add proxy information to .proxy
-option "export http_proxy" $PROXY .profile
-option "export https_proxy" $PROXY .profile
-option "export no_proxy" $NO_PROXY .profile
-option "export NO_PROXY" $NO_PROXY .profile
+function setup_userenv()
+{
+    echo "==> Setup proxy to user profile"
+    # Add proxy information to .profile
+    if [[ ! -f ~/.profile ]]
+    then
+        touch ~/.profile
+    fi
+    sed -i '/proxy/d' ~/.profile
+    sed -i '/minikube entry /d' ~/.profile
+    
+    # Add proxy information to .proxy
+    option "export http_proxy" $PROXY_IP .profile
+    option "export https_proxy" $PROXY_IP .profile
+    option "export HTTP_PROXY" $PROXY_IP .profile
+    option "export HTTPS_PROXY" $PROXY_IP .profile
+    option "export no_proxy" $NO_PROXY .profile
+    option "export NO_PROXY" $NO_PROXY .profile
 
-. .profile
+    . .profile
+}
 
-echo "==> Add proxy to docker http-proxy "
-# Add proxy information to docker http-proxy.conf
+function setup_docker_service_env()
+    {
+    echo "==> Add proxy to docker http-proxy "
+    # Add proxy information to docker http-proxy.conf
 cat > /etc/systemd/system/docker.service.d/http-proxy.conf <<EOF
 [Service]
-Environment="HTTP_PROXY=${PROXY}"
-Environment="HTTPS_PROXY=${PROXY}"
-Environment="NO_PROXY=$NO_PROXY"
+Environment="HTTP_PROXY=${PROXY_IP}"
+Environment="HTTPS_PROXY=${PROXY_IP}"
+Environment="NO_PROXY=${NO_PROXY}"
 EOF
+}
 
-# Turn off swap
-echo "==> Turn off swap space"
-sudo swapoff -a
-sudo sed -i '/ swap / s/^/#/' /etc/fstab
-cat /etc/fstab
+function setup_swap_off()
+{
+    # Turn off swap
+    echo "==> Turn off swap space"
+    sudo swapoff -a
+    sudo sed -i '/ swap / s/^/#/' /etc/fstab
+    cat /etc/fstab
+}
 
-echo "==================================================================="
-echo "==> Install docker and conntrack"
-echo "==================================================================="
-sudo apt-get install -y docker.io
-sudo apt-get install -y conntrack
+function install_minikube()
+{
+    minikube_version=${1:-v1.23.2}
+    r=https://api.github.com/repos/kubernetes/minikube/releases
+    curl -LO $(curl -s $r | grep -o "http.*download/${minikube_version}/minikube-linux-amd64" | head -n1)
 
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-
-apt-get install -y kubelet kubeadm
-
-
-echo "==================================================================="
-echo "==> Download and install minikube version 1.28.0 "
-echo "==================================================================="
-set -x
-minikube_version=v1.23.2
-r=https://api.github.com/repos/kubernetes/minikube/releases
-curl -LO $(curl -s $r | grep -o "http.*download/${minikube_version}/minikube-linux-amd64" | head -n1)
-
-#curl -LO https://github.com/kubernetes/minikube/releases/download/v1.16.0/minikube-linux-amd64
-
-echo "==> Install minikube "
-sudo install minikube-linux-amd64 /usr/local/bin/minikube
+    echo "==> Install minikube "
+    sudo install minikube-linux-amd64 /usr/local/bin/minikube
+}
 
 
-echo "==> Start up minikube "
-minikube start --vm-driver=none --memory=2048 --docker-env NO_PROXY=$NO_PROXY
+function install_minikube_v1.16()
+{
+    info "   Install docker and conntrack"
+    apt-get install -y docker.io
+    apt-get install -y conntrack
 
-# Restarting the minikube and disabling the proxy to ensure DNS service starts
-echo "==> Restart the minikube "
-minikube stop
-unset http_proxy
-unset https_proxy
+    echo "==> Download minikube version 1.16.0 "
+    curl -LO https://github.com/kubernetes/minikube/releases/download/v1.16.0/minikube-linux-amd64
+
+    echo "==> Install minikube "
+    install minikube-linux-amd64 /usr/local/bin/minikube
+}
+
+function install_minikube_latest()
+{
+  #wget https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+  wget https://github.com/kubernetes/minikube/releases/download/v1.25.1/minikube-linux-amd64
+  chmod +x minikube-linux-amd64
+  sudo mv minikube-linux-amd64 /usr/local/bin/minikube
+
+  #curl -LO https://storage.googleapis.com/kubernetes-release/release/`curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt`/bin/linux/amd64/kubectl
+  curl -LO https://storage.googleapis.com/kubernetes-release/release/v1.23.3/bin/linux/amd64/kubectl
+  chmod +x ./kubectl
+  sudo mv ./kubectl /usr/local/bin/kubectl
+  sudo mv ./kubectl /usr/bin/kubectl
+  kubectl version -o json  --client
+}
+
+function restart_minikube()
+{
+    info "Restart up minikube"
+    minikube stop
+    unset http_proxy
+    unset https_proxy
 
 cat > /etc/environment <<EOF
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
@@ -111,17 +161,71 @@ export no_proxy="$NO_PROXY"
 export NO_PROXY="$NO_PROXY"
 EOF
 
-minikube start --memory=2048 --docker-env NO_PROXY=$NO_PROXY
+    minikube start --vm-driver=none --cni calico --docker-env NO_PROXY=$NO_PROXY
+}
 
-echo "==================================================================="
-echo "Install minikube - COMPLETE "
-echo "==================================================================="
 
-echo "==> Verifying minikube installation "
+function start_minikube()
+{
+    info "Start up minikube"
+    . .profile
+    minikube start --vm-driver=none --cni calico --docker-env NO_PROXY=$NO_PROXY
+}
 
-minikube status
+function validate_minikube()
+{
+    info "Verifying minikube installation "
 
-minikube update-context
+    minikube status
 
-kubectl get pods -A
+    minikube update-context
 
+    kubectl get pods -A
+}
+
+
+function usage()
+{
+  echo "Usage"
+  echo "$0 [options] [ip]"
+  echo "Options "
+  echo "1 setup environment"
+  echo "2 Install and start install minikube"
+  echo "3 Restart minikube"
+  echo "6 Uninstall minikube"
+}
+
+function main()
+{
+    install_minikube_latest
+    start_minikube
+    validate_minikube
+}
+
+
+case $1 in
+   1)
+       setup_k8senv
+       setup_userenv
+       setup_docker_service_env
+       setup_swap_off
+       init_env
+       ;;
+   2)
+       main
+       ;;
+   3)
+       restart_minikube
+       ;;
+   4)
+       check_env
+       ;;
+   5)
+       setup_userenv
+       ;;
+   6)
+       uninstall_minikube
+       ;;
+   *)
+       usage
+esac
