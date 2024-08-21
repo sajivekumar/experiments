@@ -99,11 +99,17 @@ func main() {
              }
         } else {
             server_certs := client.ConnectionState().PeerCertificates
-            fmt.Printf("Subject: %s\n", server_certs[0].Subject)
-            fmt.Printf("Issuer: %s\n", server_certs[0].Issuer)
+            for s:=0; s<len(server_certs); s++ {
+               fmt.Printf("Subject: %s\n", server_certs[s].Subject)
+               fmt.Printf("Issuer: %s\n", server_certs[s].Issuer)
+            }
             fmt.Printf("==============================\n")
             verified_chains := client.ConnectionState().VerifiedChains
-            fmt.Printf("%s\n", verified_chains[0])
+
+            for i:=0; i<len(verified_chains); i++ {
+                fmt.Printf("Subject: %s\n", verified_chains[i][0].Subject)
+                fmt.Printf("Issuer: %s\n", verified_chains[i][0].Issuer)
+            }
 
             buf, err := io.ReadAll(client)
             if err != nil {
@@ -114,3 +120,4 @@ func main() {
 
         client.Close()
 }
+
